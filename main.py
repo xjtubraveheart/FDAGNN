@@ -3,6 +3,8 @@ import time, datetime
 import argparse, logging
 import numpy as np
 from numpy import random
+import scipy.sparse as sp
+import numpy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -107,6 +109,40 @@ def del_edgenode_indegree(graph):
     graph.remove_edges(graph.in_edges(node_index_edge,'eid'))
     return dgl.add_self_loop(graph)
 
+#目前实现二跳邻居图
+def compute_adj_K(graph, K):
+    if K == 1:
+        return graph
+    adj_coo = graph.adj_sparse('coo')
+    i=adj_coo[0].numpy()
+    j=adj_coo[1].numpy()
+    data=np.ones_like(i)
+    adj_coo_torch=torch.sparse_coo_tensor(torch.tensor([i,j]),torch.tensor(data), [graph.num_nodes(), graph.num_nodes()]) 
+    adj_coo_torch=adj_coo_torch.float()
+    adj_coo_K = adj_coo_torch
+    for i in range(K-1):
+        adj_coo_K = torch.sparse.mm(adj_coo_K, adj_coo_torch)#稀疏型：A^2，'COO'
+    indices = adj_coo_K._indices().detach().numpy()
+    row = indices[0]
+    col = indices[1]
+    values = adj_coo_K._values().detach().numpy()
+    not_K_neigh = np.argwhere(values > 1)
+    values = np.delete(values, not_K_neigh)
+    row = np.delete(row, not_K_neigh)
+    col = np.delete(col, not_K_neigh)
+    coo = sp.coo_matrix((values, (row, col)), shape=(graph.num_nodes(), graph.num_nodes()))
+    graph_K_hop = dgl.from_scipy(coo)
+    graph_K_hop = dgl.remove_self_loop(graph_K_hop)
+    graph_K_hop = dgl.add_self_loop(graph_K_hop)
+    # graph_2_hop = del_edgenode_indegree(graph_2_hop)
+    # adj_2_g=torch.sparse_coo_tensor(adj_coo_2._indices(),torch.tensor(values), [graph.num_nodes(), graph.num_nodes()])
+    # graph_K_hop.ndata['feat'] = graph.ndata['feat']
+    # graph_K_hop.ndata['label'] = graph.ndata['label']
+    # graph_2_hop.ndata['train_mask'] = graph.ndata['train_mask']
+    # graph_2_hop.ndata['val_mask'] = graph.ndata['val_mask']
+    # graph_2_hop.ndata['test_mask'] = graph.ndata['test_mask']
+    return graph_K_hop
+
 def main(args):
     # logging基础配置
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -143,22 +179,29 @@ def main(args):
         #g = gen_mask(dataset[0], 6000,4000, 5000)
         # g, train_idx = gen_mask_same_num(dataset[0], 6000, 4000, 5000)
         g, train_idx = gen_mask(dataset[0], 0.2, 0.2) 
-        label_names=['0','1','2']     
-    if args.edgenode:
-        g = del_edgenode_indegree(g)
-    g = g.to(device)
-    if args.self_loop:
-        g = dgl.remove_self_loop(g)
-        g = dgl.add_self_loop(g)    
-    features = g.ndata['feat'].float()
-    labels = g.ndata['label']
-    train_mask = g.ndata['train_mask']
-    val_mask = g.ndata['val_mask']
-    test_mask = g.ndata['test_mask']
+        label_names=['0','1','2']
+
+    # if args.self_loop:
+    #     g = dgl.remove_self_loop(g)
+    #     g = dgl.add_self_loop(g)    
+    features = g.ndata['feat'].float().to(device)
+    labels = g.ndata['label'].to(device)
+    train_mask = g.ndata['train_mask'].to(device)
+    val_mask = g.ndata['val_mask'].to(device)
+    test_mask = g.ndata['test_mask'].to(device)
     num_feats = features.shape[1]
-    num_edges = g.num_edges()
+    
+    g_hops = []
+    for i in range(args.neigh_hop):
+        g_hop = compute_adj_K(g, i+1)
+        if args.edgenode:
+            g_hop = del_edgenode_indegree(g_hop)
+        g_hops.append(g_hop)
+    
+    # g_hops = g_hops.to(device)
+    
     logging.log(23,f"---------------------dataset: {args.dataset}-------------------------------------------------------------")
-    logging.log(23,f"filterbanks: {args.filterbanks} hidden: {args.hidden} seed: {args.seed} lr: {args.lr} weight_decay: {args.weight_decay} feat_drop: {args.feat_drop} attr_drop:{args.attr_drop} self_loop:{args.self_loop} hidden_channel:{args.hidden_channel}")
+    logging.log(23,f"hidden: {args.hidden} seed: {args.seed} lr: {args.lr} weight_decay: {args.weight_decay} epochs: {args.epochs} feat_drop: {args.feat_drop} attr_drop:{args.attr_drop} hidden_channel:{args.hidden_channel} max_hop:{args.neigh_hop}")
     # model = MSGCN(g,
     # model = MLPGCN(g,
     #               num_feats,
@@ -172,8 +215,8 @@ def main(args):
     #               filterbank = args.filterbanks,
     #               self_loop = args.self_loop
     #             )
-    model = MLP(num_feats, args.hidden, n_classes, args.feat_drop)
-    # model = DiffGCN(g, num_feats, args.hidden, n_classes, 1, args.feat_drop)
+    # model = MLP(num_feats, args.hidden, n_classes, args.feat_drop)
+    model = DiffGCN(g_hops, num_feats, args.hidden, n_classes, args.neigh_hop, args.feat_drop, device)
     if args.early_stop:
         stopper = EarlyStopping(args.patience)
     model.to(device)
@@ -184,8 +227,6 @@ def main(args):
     last_time = start_time
     
     for epoch in range(args.epochs):
-        # if hasattr(torch.cuda, 'empty_cache'):
-        #     torch.cuda.empty_cache()
         model.train()
         logits = model(features)
         loss = loss_fcn(logits[train_mask],labels[train_mask])
@@ -204,8 +245,7 @@ def main(args):
                         f"({duration:.3f} sec)")
         if args.early_stop:
             if stopper.step(val_acc, model, epoch, train_loss, val_loss):
-                break
-            
+                break   
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()  
@@ -228,18 +268,17 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='DiffGCN')
     parser.add_argument('--dataset', type=str, default='BUPT', help='cora, citeseer, citeseer_sg, pubmed, BUPT, BUPT_SG')
-    parser.add_argument('--filterbanks', type=str, default='LP', help='LP, HP, BP, LP+HP, LP+BP, HP+BP, ALL')
     parser.add_argument("--feat_drop", type=float, default=0, help="Input dropout probability")
     parser.add_argument("--attr_drop", type=float, default=0, help="attention dropout probability")
-    parser.add_argument('--hidden', type=int, default=1024, help='Number of hidden units.')
-    parser.add_argument('--mlp_dim', type=int, default=4096, help='MLP output dim.')    
+    parser.add_argument('--hidden', type=int, default=32, help='Number of hidden units.')   
+    parser.add_argument('--neigh_hop', type=int, default=2, help='K-hop neighbors.')   
     parser.add_argument('--hidden_channel', type=int, default=8, help='Number of hidden units in ChannelAttention.')
     parser.add_argument('--lr', type=float, default=5e-3, help='Initial learning rate.')
     parser.add_argument('--weight_decay', type=float, default=5e-4, help='Weight decay (L2 loss on parameters).')
     parser.add_argument('--early_stop', action='store_true', default=True,
                         help="indicates whether to use early stop or not")
-    parser.add_argument('--epochs', type=int, default=4000, help='Number of epochs to train.')
-    parser.add_argument('--patience', type=int, default=2000, help='Patience in early stopping')
+    parser.add_argument('--epochs', type=int, default=1000, help='Number of epochs to train.')
+    parser.add_argument('--patience', type=int, default=500, help='Patience in early stopping')
     parser.add_argument('--train_ratio', type=float, default=0.6, help='Ratio of training set')
     parser.add_argument('--val_ratio', type=float, default=0.2, help='Ratio of valing set')
     parser.add_argument('--test_ratio', type=float, default=0.2, help='Ratio of testing set')
