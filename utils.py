@@ -8,15 +8,15 @@ class EarlyStopping:
         self.best_score = None
         self.early_stop = False
         self.best_epoch = None
-        self.best_epoch_train_loss = 0
+        # self.best_epoch_train_loss = 0
         self.best_epoch_val_loss = 0
         
-    def step(self, acc, model, epoch, train_loss, val_loss):
+    def step(self, acc, model, epoch, val_loss):
         score = acc
         if self.best_score is None:
             self.best_score = score
             self.best_epoch = epoch
-            self.best_epoch_train_loss = train_loss
+            # self.best_epoch_train_loss = train_loss
             self.best_epoch_val_loss = val_loss
             self.save_checkpoint(model)
         elif score < self.best_score:
@@ -27,7 +27,7 @@ class EarlyStopping:
         else:
             self.best_score = score
             self.best_epoch = epoch
-            self.best_epoch_train_loss = train_loss
+            # self.best_epoch_train_loss = train_loss
             self.best_epoch_val_loss = val_loss
             self.save_checkpoint(model)
             self.counter = 0
@@ -35,5 +35,5 @@ class EarlyStopping:
 
     def save_checkpoint(self, model):
         '''Saves model when validation loss decrease.'''
-        torch.save(model.state_dict(), 'es_checkpoint.pt')
+        torch.save(model.state_dict(), '/code/DiffGCN/es_checkpoint.pt')
 

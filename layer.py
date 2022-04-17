@@ -13,23 +13,24 @@ def diff(graph,feat):#对中心节点和其邻居节点特征差异直接做平�
         return graph.dstdata['diff']
 
 class DiffAttention(nn.Module):
-    def __init__(self, g, in_dim, out_dim, feat_drop=0, device='cuda'):
+    def __init__(self, in_dim, out_dim, feat_drop=0, device='cuda'):
         super(DiffAttention, self).__init__()
-        self.g = g.to(device)
         self.feat_drop = nn.Dropout(feat_drop)
+        self.device = device
         self.fc1 = nn.Linear(in_dim, out_dim, bias=False)
-        # self.fc2 = nn.Linear(in_dim, out_dim, bias=False)
+        self.fc2 = nn.Linear(in_dim, out_dim, bias=False)
         self.attn_fc = nn.Linear(out_dim, 1, bias=False)
         
         nn.init.xavier_uniform_(self.fc1.weight, gain=1.414)
-        # nn.init.xavier_uniform_(self.fc2.weight, gain=1.414)
+        nn.init.xavier_uniform_(self.fc2.weight, gain=1.414)
         nn.init.xavier_uniform_(self.attn_fc.weight, gain=1.414)
     
     def edge_attention(self, edges):
         diff = edges.dst['h'] - edges.src['h']    
-        # diff = self.fc2(diff)
+        # diff = self.fc1(diff.float())
+        diff = self.fc2(diff.float())
         a = self.attn_fc(diff)
-        return {'e': torch.tanh(a), 'diff_v_sub_u': diff}  #将中心节点与其邻居节点的差异保存在边上
+        return {'e': F.leaky_relu(a), 'diff_v_sub_u': diff}  #将中心节点与其邻居节点的差异保存在边上
     
     def message_func(self, edges):
         return {'diff_v_sub_u': edges.data['diff_v_sub_u'], 'e': edges.data['e']}
@@ -37,18 +38,21 @@ class DiffAttention(nn.Module):
     def reduce_func(self, nodes):
         alpha = F.softmax(nodes.mailbox['e'], dim=1)
         h_diff = torch.sum(alpha * nodes.mailbox['diff_v_sub_u'], dim=1)
-        # neighbor_diff = nodes.mailbox['diff_v_sub_u'].flatten(1)
-        # return {'h_diff': h_diff, 'neighbor_diff': nodes.mailbox['diff_v_sub_u'].flatten(1)}
         return {'h_diff': h_diff}
        
-    def forward(self, h_init):    
-        # h = h.to(self.device)
-        h =  self.fc1(h_init)      
-        self.g.ndata['h'] = h
-        self.g.apply_edges(self.edge_attention) 
-        self.g.update_all(self.message_func, self.reduce_func) 
-        # logits = self.fc1(h_init) + self.g.ndata.pop('h_diff')
-        logits = h + self.g.ndata.pop('h_diff')
+    def forward(self, g, h_src, h_dst):    
+        # h_src =  self.fc1(h_src.float())      
+        # h_dst =  self.fc1(h_dst.float()) 
+        if g.device != self.device:
+            g = g.to(self.device)
+            h_src = h_src.to(self.device)     
+            h_dst = h_dst.to(self.device)     
+        g.srcdata['h'] = h_src
+        g.dstdata['h'] = h_dst
+        g.apply_edges(self.edge_attention) 
+        g.update_all(self.message_func, self.reduce_func) 
+        # logits = h_dst + g.dstdata.pop('h_diff')
+        logits = self.fc1(h_dst.float()) + g.dstdata.pop('h_diff')
         return torch.relu(logits)
 
 class HopsAttention(nn.Module):
@@ -168,180 +172,6 @@ def neigh_compute(graph, feat):
         #     graph.dstdata['neigh'][node_index] = torch.zeros_like(graph.dstdata['neigh'][node_index])
         # h_neigh = graph.dstdata['neigh']        
         return graph.dstdata['neigh']
-
-#LPLayer
-class LPLayer_single(nn.Module):
-    def __init__(self,
-                 in_dim,
-                 out_dim,
-                 norm=None,
-                 activation=F.relu,
-                 feat_drop=0,
-                 bias=False,
-                 self_loop=False,
-                 ):
-        super(LPLayer_single, self).__init__()
-        self.activation = activation
-        self.self_loop = self_loop
-        self.feat_drop = nn.Dropout(feat_drop)
-        self.fc = nn.Linear(in_dim, out_dim, bias=False)
-        if bias:
-            self.bias = nn.Parameter(torch.Tensor(out_dim))
-        else:
-            self.register_parameter('bias', None)
-        
-        self.reset_parameters()
-    
-    def reset_parameters(self):
-        gain = nn.init.calculate_gain('relu')
-        nn.init.xavier_uniform_(self.fc.weight, gain=gain)
-        if self.bias is not None:
-            init.zeros_(self.bias)
-
-    def forward(self, graph, feat, edge_weight=None):
-        graph = graph.local_var()
-        h_neigh = neigh_compute(graph, self.feat_drop(feat))
-        h = self.fc(h_neigh) if self.self_loop else self.fc((feat + h_neigh) / 2)
-        return self.activation(h)
-
-#HPLayer
-class HPLayer_single(nn.Module):
-    def __init__(self,
-                 in_dim,
-                 out_dim,
-                 norm=None,
-                 activation=F.relu,
-                 feat_drop=0,
-                 bias=False,
-                 self_loop=False,
-                 ):
-        super(HPLayer_single, self).__init__()
-        self.activation = activation
-        self.self_loop = self_loop
-        self.feat_drop = nn.Dropout(feat_drop)
-        self.fc = nn.Linear(in_dim, out_dim, bias=False)
-        if bias:
-            self.bias = nn.Parameter(torch.Tensor(out_dim))
-        else:
-            self.register_parameter('bias', None)
-        
-        self.reset_parameters()
-    
-    def reset_parameters(self):
-        gain = nn.init.calculate_gain('relu')
-        nn.init.xavier_uniform_(self.fc.weight, gain=gain)
-        if self.bias is not None:
-            init.zeros_(self.bias)
-
-    def forward(self, graph, feat, edge_weight=None):
-        graph = graph.local_var()
-        h_neigh = neigh_compute(graph, self.feat_drop(feat))
-        h = self.fc(feat - h_neigh) if self.self_loop else self.fc((feat - h_neigh) / 2)
-        return self.activation(h)
-
-
-class LP_Filter(nn.Module):
-    def __init__(self,
-                 in_feats,
-                 hidden,
-                 out_feats,
-                 norm=None,
-                 feat_drop=0,
-                 self_loop=False
-                 ):
-        super(LP_Filter, self).__init__()
-        self.lp_layers = nn.ModuleList()
-        self.lp_layers.append(LPLayer_single(in_feats, hidden, feat_drop=feat_drop, self_loop=self_loop))
-        self.lp_layers.append(LPLayer_single(hidden, out_feats, feat_drop=feat_drop, self_loop=self_loop))
-        
-    def forward(self, graph, feat, edge_weight=None):
-        graph = graph.local_var()
-        h_hidden = self.lp_layers[0](graph, feat)
-        logits = self.lp_layers[-1](graph, h_hidden)
-        return logits
-
-#HPLayer
-# class HP_Filter(nn.Module):
-#     def __init__(self,
-#                  in_feats,
-#                  hidden,
-#                  out_feats,
-#                  norm=None,
-#                  activation=F.relu,
-#                  feat_drop=0,
-#                  bias=False,
-#                  self_loop=False
-#                  ):
-#         super(HP_Filter, self).__init__()
-#         self.hp_layers = nn.ModuleList()
-#         self.hp_layers.append(HPLayer_single(in_feats, hidden, feat_drop=feat_drop, self_loop=self_loop))
-#         self.hp_layers.append(HPLayer_single(hidden, out_feats, feat_drop=feat_drop, self_loop=self_loop))
-        
-#     def forward(self, graph, feat, edge_weight=None):
-#         graph = graph.local_var()
-#         h_hidden = self.hp_layers[0](graph, feat)
-#         logits = self.hp_layers[-1](graph, h_hidden)
-#         return logits
-        
-# #BPLayer
-# class BPLayer_single(nn.Module):
-#     def __init__(self,
-#                  in_dim,
-#                  out_dim,
-#                  norm=None,
-#                  activation=F.relu,
-#                  feat_drop=0,
-#                  bias=False,
-#                  self_loop=False
-#                  ):
-#         super(BPLayer_single, self).__init__()
-#         self.activation = activation
-#         self.self_loop = self_loop
-#         self.feat_drop = nn.Dropout(feat_drop)
-#         self.fc = nn.Linear(in_dim, out_dim, bias=False)
-#         if bias:
-#             self.bias = nn.Parameter(torch.Tensor(out_dim))
-#         else:
-#             self.register_parameter('bias', None)
-        
-#         self.reset_parameters()
-    
-#     def reset_parameters(self):
-#         gain = nn.init.calculate_gain('relu')
-#         nn.init.xavier_uniform_(self.fc.weight, gain=gain)
-#         if self.bias is not None:
-#             init.zeros_(self.bias)
-
-#     def forward(self, graph, feat, edge_weight=None):
-#         graph = graph.local_var()
-#         h_neigh = neigh_compute(graph, self.feat_drop(feat))
-#         h_lp = feat + h_neigh
-#         h_neigh = neigh_compute(graph, self.feat_drop(h_lp))
-#         h = self.fc(h_lp - h_neigh)
-#         return self.activation(h)
-
-# #BPLayer
-# class BP_Filter(nn.Module):
-#     def __init__(self,
-#                  in_feats,
-#                  hidden,
-#                  out_feats,
-#                  norm=None,
-#                  activation=F.relu,
-#                  feat_drop=0,
-#                  bias=False,
-#                  self_loop=False
-#                  ):
-#         super(BP_Filter, self).__init__()
-#         self.bp_layers = nn.ModuleList()
-#         self.bp_layers.append(BPLayer_single(in_feats, hidden, feat_drop=feat_drop, self_loop=self_loop))
-#         self.bp_layers.append(BPLayer_single(hidden, out_feats, feat_drop=feat_drop, self_loop=self_loop))
-        
-#     def forward(self, graph, feat, edge_weight=None):
-#         graph = graph.local_var()
-#         h_hidden = self.bp_layers[0](graph, feat)
-#         logits = self.bp_layers[-1](graph, h_hidden)
-#         return logits
 
 class ChannelAttention(nn.Module):
     def __init__(self, in_size, hidden_size=32, dropout=0):
