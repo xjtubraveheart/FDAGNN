@@ -266,7 +266,7 @@ def main(args):
     else:
         train_size = len(train_nid) if args.hidden < 200 and args.train_ratio < 0.25 else args.batch_size
         val_size = len(val_nid) if args.hidden < 200 and args.val_ratio < 0.25 else args.batch_size
-        train_size = len(train_nid) if args.hidden < 200 and args.train_ratio > 0.55 else args.batch_size 
+        test_size = len(test_nid) if args.hidden < 200 and args.train_ratio > 0.55 else args.batch_size 
     sampler = dgl.dataloading.MultiLayerFullNeighborSampler(1)
     train_dataloader = []
     for i in range(args.neigh_hop):
@@ -355,13 +355,13 @@ if __name__ == '__main__':
     parser.add_argument("--feat_drop", type=float, default=0, help="Input dropout probability")
     parser.add_argument("--attr_drop", type=float, default=0, help="attention dropout probability")
     parser.add_argument('--hidden', type=int, default=32, help='Number of hidden units.')   
-    parser.add_argument('--neigh_hop', type=int, default=1, help='K-hop neighbors.')   
+    parser.add_argument('--neigh_hop', type=int, default=2, help='K-hop neighbors.')   
     parser.add_argument('--lr', type=float, default=4e-3, help='Initial learning rate.')
-    parser.add_argument('--weight_decay', type=float, default=1e-3, help='Weight decay (L2 loss on parameters).')
+    parser.add_argument('--weight_decay', type=float, default=6e-4, help='Weight decay (L2 loss on parameters).')
     parser.add_argument('--early_stop', action='store_true', default=True,
                         help="indicates whether to use early stop or not")
-    parser.add_argument('--epochs', type=int, default=4000, help='Number of epochs to train.')
-    parser.add_argument('--patience', type=int, default=2000, help='Patience in early stopping')
+    parser.add_argument('--epochs', type=int, default=1000, help='Number of epochs to train.')
+    parser.add_argument('--patience', type=int, default=500, help='Patience in early stopping')
     parser.add_argument('--train_ratio', type=float, default=0.2, help='Ratio of training set')
     parser.add_argument('--val_ratio', type=float, default=0.2, help='Ratio of valing set')
     parser.add_argument('--seed', type=int, default=42, help="seed for our system")
