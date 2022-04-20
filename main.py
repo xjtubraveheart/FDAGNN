@@ -2,6 +2,7 @@ from pickle import FALSE
 from statistics import mean
 import time, datetime
 import argparse, logging
+from turtle import shape
 import numpy as np
 from numpy import random
 import scipy.sparse as sp
@@ -266,7 +267,7 @@ def main(args):
     else:
         train_size = len(train_nid) if args.hidden < 200 and args.train_ratio < 0.25 else args.batch_size
         val_size = len(val_nid) if args.hidden < 200 and args.val_ratio < 0.25 else args.batch_size
-        test_size = len(test_nid) if args.hidden < 200 and args.train_ratio > 0.55 else args.batch_size 
+        test_size = len(test_nid) if args.hidden < 200 and args.train_ratio > 0.55 else args.batch_size
     sampler = dgl.dataloading.MultiLayerFullNeighborSampler(1)
     train_dataloader = []
     for i in range(args.neigh_hop):
@@ -282,8 +283,9 @@ def main(args):
             num_workers=0)
         train_dataloader.append(dataloader)
     logging.log(23,f"---------------------dataset: {args.dataset}-------------------------------------------------------------")
-    logging.log(23,f"train: {args.train_ratio * 100:.1f}% val: {args.val_ratio * 100:.1f}% hidden: {args.hidden} batch_size:{args.batch_size} max_hop:{args.neigh_hop} seed: {args.seed} lr: {args.lr} weight_decay: {args.weight_decay} epochs: {args.epochs} feat_drop: {args.feat_drop} attr_drop:{args.attr_drop}")
-    model = DiffGCN(num_feats, args.hidden, n_classes, args.neigh_hop, args.feat_drop, device)
+    logging.log(23,f"train: {args.train_ratio * 100:.1f}% val: {args.val_ratio * 100:.1f}% hidden: {args.hidden} batch_size:{args.batch_size} max_hop:{args.neigh_hop} seed: {args.seed} lr: {args.lr} weight_decay: {args.weight_decay} epochs: {args.epochs} feat_drop: {args.feat_drop} attr_drop:{args.attn_drop}")
+    model = DiffGCN(num_feats, args.hidden, n_classes, args.neigh_hop, args.feat_drop, args.attn_drop, device)
+    # model = DiffGCN(num_feats, args.hidden, n_classes, args.neigh_hop, args.feat_drop, args.attn_drop, args.gru_drop, device)#04-19
     if args.early_stop:
         stopper = EarlyStopping(args.patience)
     model.to(device)
@@ -352,16 +354,17 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='DiffGCN')
     parser.add_argument('--dataset', type=str, default='BUPT', help='cora, citeseer, citeseer_sg, pubmed, BUPT, BUPT_SG')
-    parser.add_argument("--feat_drop", type=float, default=0, help="Input dropout probability")
-    parser.add_argument("--attr_drop", type=float, default=0, help="attention dropout probability")
+    parser.add_argument("--feat_drop", type=float, default=0.5, help="Input dropout probability")
+    parser.add_argument("--attn_drop", type=float, default=0, help="attention dropout probability")
+    # parser.add_argument("--gru_drop", type=float, default=0, help="GRU dropout probability")#04-19
     parser.add_argument('--hidden', type=int, default=32, help='Number of hidden units.')   
     parser.add_argument('--neigh_hop', type=int, default=2, help='K-hop neighbors.')   
     parser.add_argument('--lr', type=float, default=4e-3, help='Initial learning rate.')
-    parser.add_argument('--weight_decay', type=float, default=6e-4, help='Weight decay (L2 loss on parameters).')
+    parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay (L2 loss on parameters).')
     parser.add_argument('--early_stop', action='store_true', default=True,
                         help="indicates whether to use early stop or not")
-    parser.add_argument('--epochs', type=int, default=1000, help='Number of epochs to train.')
-    parser.add_argument('--patience', type=int, default=500, help='Patience in early stopping')
+    parser.add_argument('--epochs', type=int, default=600, help='Number of epochs to train.')
+    parser.add_argument('--patience', type=int, default=300, help='Patience in early stopping')
     parser.add_argument('--train_ratio', type=float, default=0.2, help='Ratio of training set')
     parser.add_argument('--val_ratio', type=float, default=0.2, help='Ratio of valing set')
     parser.add_argument('--seed', type=int, default=42, help="seed for our system")
