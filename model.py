@@ -47,30 +47,21 @@ class DiffGCN(nn.Module):
             # self.neihop_select = HopsAttention(hidden_dim)            
         nn.init.xavier_uniform_(self.out_layer.weight, gain=1.414)
         
-    def forward(self, g, h_src, h_dst):
+    def forward(self, g):
+    # def forward(self, g, h_src, h_dst):
         h_e = []
         # h_self = self.fc(h_dst.float().to(self.device))#04-20 version
         for i in range(self.hop_num):
-            h_k = self.diff_layer[i](g[i], h_src[i], h_dst)
+            h_k = self.diff_layer[i](g[i].to(self.device))
             h_e.append(h_k)
         #新增邻居阶次的自适应选择
         if self.hop_num > 1:
             # 点积注意力
             # h_out = self.neihop_select(h_e, self.hop_num)
-            
-            # GRU  04-17 version self+1-hop diff   self+2-hop diff
-            h = torch.zeros(1, h_dst.shape[0], self.hidden_dim).to(self.device)
+            h = torch.zeros(1, g[0].dstdata['feat']['_N_dst'].shape[0], self.hidden_dim).to(self.device)
             for i in range(self.hop_num):
                 h_out, h = self.neihop_select(h_e[i].unsqueeze(0), h)
                 h_out = h_out.mean(0)
-            
-            #GRU 04-20 version 1-hop diff   2-hop diff
-            # h = torch.zeros(1, h_dst.shape[0], self.hidden_dim).to(self.device)
-            # # h = h_self.unsqueeze(0)
-            # for i in range(self.hop_num):
-            #     h_out, h = self.neihop_select(h_e[i].unsqueeze(0), h)
-            #     h_out = h_out.mean(0)
-            # h_out = F.elu(h_self + h_out)
             # LSTM
             # h = torch.zeros(1, feat.shape[0], self.hidden_dim).to(self.device)
             # c = torch.zeros(1, feat.shape[0], self.hidden_dim).to(self.device)
