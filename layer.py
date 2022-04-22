@@ -32,8 +32,8 @@ class DiffAttention(nn.Module):
         nn.init.xavier_uniform_(self.attn_fc.weight, gain=1.414)
     
     def edge_attention(self, edges):
-        diff = edges.dst['feat'] - edges.src['feat']    
-        # diff = edges.dst['h'] - edges.src['h']  
+        # diff = edges.dst['feat'] - edges.src['feat']    
+        diff = edges.dst['h'] - edges.src['h']  
         # diff = self.fc1(diff.float())
         diff = self.fc2(self.feat_drop(diff.float()))#04-17 version
         # diff = self.fc(self.feat_drop(diff.float()))#04-20 version  
@@ -48,26 +48,19 @@ class DiffAttention(nn.Module):
         h_diff = torch.sum(alpha * nodes.mailbox['diff_v_sub_u'], dim=1)
         return {'h_diff': h_diff}
        
-    def forward(self, g):    
-    # def forward(self, g, h_src, h_dst):    
+    # def forward(self, g):    
+    def forward(self, g, h_src, h_dst):    
         # h_src =  self.fc1(h_src.float())      
         # h_dst =  self.fc1(h_dst.float()) 
-        # if g.device != self.device:
-        #     g = g.to(self.device)
-        #     h_src = h_src.to(self.device)     
-        #     h_dst = h_dst.to(self.device)
-        # g.srcdata['h'] = h_src
-        # g.dstdata['h'] = h_dst
+        g.srcdata['h'] = h_src
+        g.dstdata['h'] = h_dst
         g.apply_edges(self.edge_attention) 
         g.update_all(self.message_func, self.reduce_func) 
         # logits = h_dst + g.dstdata.pop('h_diff')
         
-        #04-17 version
-        # if test:
-        #     logits = self.fc1(g.dstdata['feat']['_N_dst'].float()) + g.dstdata.pop('h_diff')['_N_dst']
-        # else:
-        #     logits = self.fc1(g.dstdata['feat'].float()) + g.dstdata.pop('h_diff')        
-        logits = self.fc1(g.dstdata['feat']['_N_dst'].float()) + g.dstdata.pop('h_diff')['_N_dst']        
+        #04-17 version       
+        # logits = self.fc1(g.dstdata['feat'].float()) + g.dstdata.pop('h_diff') 
+        logits = self.fc1(h_dst.float()) + g.dstdata.pop('h_diff')      
         return F.elu(logits)
         
         #04-20 version
