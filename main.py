@@ -159,7 +159,8 @@ def loader_sub(g_hops, node_id, size, device, mask, batch_size):
     dataloader_full = loader(g_hops, node_id, size, device)
     train_g = []
     for i in range(args.neigh_hop):
-        for _, _, blocks in dataloader_full[i]:
+        for neighbor, _, blocks in dataloader_full[i]:
+            # train_g.append(g_hops[i].subgraph(neighbor))
             train_g.append(dgl.block_to_graph(blocks[0]))
             # train_g.append(blocks[0])
     mini_nid={}
@@ -302,8 +303,8 @@ def main(args):
         # for step, ((neibor_nodes_1, target_nodes, blocks_1), (neibor_nodes_2, _, blocks_2)) in enumerate(zip(train_dataloader_sub[0], train_dataloader_sub[-1])): 
         #     model.train() 
         #     blocks = [blocks_1[0], blocks_2[0]]
-        pred = torch.zeros(len(train_nid), n_classes).to(torch.device('cuda', 0))
-        label = torch.zeros(len(train_nid)).to(torch.device('cuda', 0))
+        pred = torch.zeros(len(train_nid), n_classes).to(device)
+        label = torch.zeros(len(train_nid)).to(device)
         label = label.long()
         for i, train_block in enumerate(train_blocks):
             batch_pred = model(train_block)
@@ -381,7 +382,7 @@ if __name__ == '__main__':
     parser.add_argument('--weight_decay', type=float, default=6e-4, help='Weight decay (L2 loss on parameters).')
     parser.add_argument('--early_stop', action='store_true', default=True,
                         help="indicates whether to use early stop or not")
-    parser.add_argument('--epochs', type=int, default=100, help='Number of epochs to train.')
+    parser.add_argument('--epochs', type=int, default=200, help='Number of epochs to train.')
     parser.add_argument('--patience', type=int, default=2000, help='Patience in early stopping')
     parser.add_argument('--train_ratio', type=float, default=0.2, help='Ratio of training set')
     parser.add_argument('--val_ratio', type=float, default=0.2, help='Ratio of valing set')
