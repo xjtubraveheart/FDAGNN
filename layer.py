@@ -19,9 +19,9 @@ class DiffAttention(nn.Module):
         self.attn_drop = nn.Dropout(attn_drop)
         self.device = device
         #04-17 version
-        self.fc1 = nn.Linear(in_dim, out_dim, bias=False)
+        # self.fc1 = nn.Linear(in_dim, out_dim, bias=False)
         self.fc2 = nn.Linear(in_dim, out_dim, bias=False)
-        nn.init.xavier_uniform_(self.fc1.weight, gain=1.414)
+        # nn.init.xavier_uniform_(self.fc1.weight, gain=1.414)
         nn.init.xavier_uniform_(self.fc2.weight, gain=1.414)
         
         #04-20 version
@@ -60,8 +60,8 @@ class DiffAttention(nn.Module):
         
         #04-17 version       
         # logits = self.fc1(g.dstdata['feat'].float()) + g.dstdata.pop('h_diff') 
-        logits = self.fc1(h_dst.float()) + g.dstdata.pop('h_diff')      
-        # logits = g.dstdata.pop('h_diff')  #04-23    
+        # logits = self.fc1(h_dst.float()) + g.dstdata.pop('h_diff')      
+        logits = g.dstdata.pop('h_diff')  #04-23    
         return F.elu(logits)
         
         #04-20 version

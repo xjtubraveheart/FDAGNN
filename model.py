@@ -30,13 +30,12 @@ class DiffGCN(nn.Module):
         self.device = device
         self.feat_drop = nn.Dropout(feat_drop)
         #04-20 version
-        # self.fc = nn.Linear(in_dim, hidden_dim, bias=False)
-        # nn.init.xavier_uniform_(self.fc.weight, gain=1.414)
+        self.fc = nn.Linear(in_dim, hidden_dim, bias=False)
+        nn.init.xavier_uniform_(self.fc.weight, gain=1.414)
         
         self.diff_layer = nn.ModuleList()
         self.fusion = nn.ModuleList()
-        # self.fusion.append(GRU(hidden_dim, hidden_dim, bias=False))
-        # self.diff_layer.append(DiffAttention(g[0], in_dim, hidden_dim, feat_drop))        
+        self.fusion.append(GRU(hidden_dim, hidden_dim, bias=False))        
         for i in range(hop_num):#DiffAttention层堆叠：提取中心节点与多跳邻居节点的特征差异
             self.diff_layer.append(DiffAttention(in_dim, hidden_dim, feat_drop, attn_drop, device))
             self.fusion.append(GRU(hidden_dim, hidden_dim, bias=False))
@@ -64,11 +63,11 @@ class DiffGCN(nn.Module):
             # h_out = self.neihop_select(h_e, self.hop_num)
             
         h = torch.zeros(1, h_dst.shape[0], self.hidden_dim).to(self.device)
-        # h_in = self.fc(self.feat_drop(h_dst.float())).unsqueeze(0)#04-23
-        # h_out, h = self.fusion[0](h_in, h)#04-23
+        h_in = self.fc(self.feat_drop(h_dst.float())).unsqueeze(0)#04-23
+        h_out, h = self.fusion[0](h_in, h)#04-23
         for i in range(self.hop_num):
-            h_out, h = self.fusion[i](h_e[i].unsqueeze(0), h)
-            # h_out, h = self.fusion[i+1](h_e[i].unsqueeze(0), h)#04-23
+            # h_out, h = self.fusion[i](h_e[i].unsqueeze(0), h)
+            h_out, h = self.fusion[i+1](h_e[i].unsqueeze(0), h)#04-23
         h_out = h_out.mean(0)
             
             # LSTM
