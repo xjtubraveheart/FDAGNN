@@ -128,11 +128,13 @@ def compute_adj_K(graph, K):
     graph_K_hop = dgl.from_scipy(coo)
     graph_K_hop = dgl.remove_self_loop(graph_K_hop)
     graph_K_hop = dgl.add_self_loop(graph_K_hop)
-    # graph_K_hop.ndata['feat'] = graph.ndata['feat']
+    # graph_2_hop = del_edgenode_indegree(graph_2_hop)
+    # adj_2_g=torch.sparse_coo_tensor(adj_coo_2._indices(),torch.tensor(values), [graph.num_nodes(), graph.num_nodes()])
+    graph_K_hop.ndata['feat'] = graph.ndata['feat']
     # graph_K_hop.ndata['label'] = graph.ndata['label']
-    # graph_K_hop.ndata['train_mask'] = graph.ndata['train_mask']
-    # graph_K_hop.ndata['val_mask'] = graph.ndata['val_mask']
-    # graph_K_hop.ndata['test_mask'] = graph.ndata['test_mask']
+    graph_K_hop.ndata['train_mask'] = graph.ndata['train_mask']
+    graph_K_hop.ndata['val_mask'] = graph.ndata['val_mask']
+    graph_K_hop.ndata['test_mask'] = graph.ndata['test_mask']
     return graph_K_hop
 
 def loader(g_hops, node_id, size, device):
@@ -148,6 +150,7 @@ def loader(g_hops, node_id, size, device):
             num_workers=0)
     return dataloader
 
+#全部在GPU上进行batch
 def loader_sub(sub_graphs, node_id, size, device):
     sampler = dgl.dataloading.MultiLayerFullNeighborSampler(1)
     dataloader_batch = []
@@ -161,9 +164,10 @@ def load_subtensor(nfeat, target_nodes, neigbor_nodes_1, neibor_nodes_2, device)
     """
     Extracts features for a subset of nodes
     """
-    batch_srcnodes = [nfeat[neigbor_nodes_1].to(device),nfeat[neibor_nodes_2].to(device)]
-    batch_dstnodes = nfeat[target_nodes].to(device)
+    batch_srcnodes = [nfeat[0][neigbor_nodes_1].to(device),nfeat[-1][neibor_nodes_2].to(device)]
+    batch_dstnodes = nfeat[0][target_nodes].to(device)
     return batch_srcnodes, batch_dstnodes
+
 
 def inductive_split(g):
     """Split the graph into training graph, validation graph, and test graph by training
@@ -195,6 +199,7 @@ def evaluate(model, blocks, num_node_id, src_feats, dst_feats, labels, n_classes
                 pred[i * batch_size : , : ] = batch_pred
         loss = loss_fcn(pred, labels)
         return accuracy(pred, labels), loss, pred
+
 
 def main(args):
     # logging基础配置
@@ -240,17 +245,34 @@ def main(args):
         g_hop = compute_adj_K(g, i+1)
         if args.edgenode:
             g_hop = del_edgenode_indegree(g_hop)        
-        g_hops.append(g_hop.formats(['csc']))
-
-    train_nid = torch.nonzero(g_hops[0].ndata['train_mask'], as_tuple=True)[0]
-    val_nid = torch.nonzero(g_hops[0].ndata['val_mask'], as_tuple=True)[0]
-    test_nid = torch.nonzero(g_hops[0].ndata['test_mask'], as_tuple=True)[0]
-    all_feat = g_hops[0].ndata.pop('feat')
-    all_labels = g_hops[0].ndata.pop('label')
-    train_labels = all_labels[train_nid]
-    val_labels = all_labels[val_nid]
-    test_labels = all_labels[test_nid]
-    num_feats = all_feat.shape[1]
+        # g_hops.append(g_hop.formats(['csc']))
+        g_hops.append(g_hop)
+        
+    for i in range(args.neigh_hop):
+        train_g_s, val_g_s, test_g_s = inductive_split(g_hops[i])
+        #下一步在GPU上进行采样，GPU采样只支持csc格式
+        train_g_s = train_g_s.formats(['csc'])
+        val_g_s = val_g_s.formats(['csc'])
+        val_g_s = val_g_s.formats(['csc'])
+        train_g.append(train_g_s)
+        val_g.append(val_g_s)
+        test_g.append(test_g_s)
+    
+    train_nid = torch.nonzero(train_g[0].ndata['train_mask'], as_tuple=True)[0]
+    val_nid = torch.nonzero(val_g[0].ndata['val_mask'], as_tuple=True)[0]
+    test_nid = torch.nonzero(test_g[0].ndata['test_mask'], as_tuple=True)[0]
+    train_g_feat, val_g_nfeat, test_g_nfeat=[], [], []
+    for i in range(args.neigh_hop):
+        train_g_feat.append(train_g[i].ndata.pop('feat'))
+        val_g_nfeat.append(val_g[i].ndata.pop('feat'))
+        test_g_nfeat.append(test_g[i].ndata.pop('feat'))
+    train_labels = train_g[0].ndata.pop('label')
+    val_labels = val_g[0].ndata.pop('label')
+    test_labels = test_g[0].ndata.pop('label')
+    train_labels = train_labels[train_nid]
+    val_labels = val_labels[val_nid]
+    test_labels = test_labels[test_nid]
+    num_feats = train_g_feat[0].shape[1]
 
     if args.neigh_hop == 1:
         train_size = len(train_nid)
@@ -269,27 +291,24 @@ def main(args):
     model.to(device)
     loss_fcn = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    
-    train_dataloader_sub = loader_sub(g_hops, train_nid, train_size, torch.device('cpu'))
-    val_dataloader_sub = loader_sub(g_hops, val_nid, val_size, torch.device('cpu'))
-    test_dataloader_sub = loader_sub(g_hops, test_nid, test_size, torch.device('cpu'))
+    train_dataloader_sub = loader_sub(train_g, train_nid, train_size, torch.device('cpu'))
+    val_dataloader_sub = loader_sub(val_g, val_nid, val_size, torch.device('cpu'))
+    test_dataloader_sub = loader_sub(test_g, test_nid, test_size, torch.device('cpu'))
     train_blocks, val_blocks, test_blocks = [], [], []
     batch_srcnodes_trains, batch_srcnodes_vals, batch_srcnodes_tests = [], [], []
     batch_dstnodes_trains, batch_dstnodes_vals, batch_dstnodes_tests = [], [], []
     for (neibor_nodes_1, train_target_nodes, blocks_1), (neibor_nodes_2, _, blocks_2) in zip(train_dataloader_sub[0], train_dataloader_sub[-1]): 
         train_blocks.append([blocks_1[0].to(device), blocks_2[0].to(device)])
-        batch_srcnodes_train, batch_dstnodes_train= load_subtensor(all_feat, train_target_nodes, neibor_nodes_1, neibor_nodes_2, device)
+        batch_srcnodes_train, batch_dstnodes_train= load_subtensor(train_g_feat, train_target_nodes, neibor_nodes_1, neibor_nodes_2, device)
         batch_srcnodes_trains.append(batch_srcnodes_train)
         batch_dstnodes_trains.append(batch_dstnodes_train)        
     for (neibor_nodes_1, val_target_nodes, val_blocks_1), (neibor_nodes_2, _, val_blocks_2) in zip(val_dataloader_sub[0], val_dataloader_sub[-1]): 
         val_blocks.append([val_blocks_1[0].to(device), val_blocks_2[0].to(device)])
-        batch_srcnodes_val, batch_dstnodes_val= load_subtensor(all_feat, val_target_nodes, neibor_nodes_1, neibor_nodes_2, device) 
+        batch_srcnodes_val, batch_dstnodes_val= load_subtensor(val_g_nfeat, val_target_nodes, neibor_nodes_1, neibor_nodes_2, device) 
         batch_srcnodes_vals.append(batch_srcnodes_val)
         batch_dstnodes_vals.append(batch_dstnodes_val) 
     del  blocks_1, blocks_2, val_blocks_1,  val_blocks_2
-    del  batch_srcnodes_train, batch_dstnodes_train, batch_srcnodes_val, batch_dstnodes_val
-    
-    #train and val 
+    del  batch_srcnodes_train, batch_dstnodes_train, batch_srcnodes_val, batch_dstnodes_val 
     start_time = time.time()
     last_time = start_time
     for epoch in range(args.epochs):
@@ -332,7 +351,7 @@ def main(args):
         model.load_state_dict(torch.load('/code/DiffGCN/es_checkpoint.pt'))
     for (neibor_nodes_1, test_target_nodes, test_blocks_1), (neibor_nodes_2, _, test_blocks_2) in zip(test_dataloader_sub[0], test_dataloader_sub[-1]): 
         test_blocks.append([test_blocks_1[0].to(device), test_blocks_2[0].to(device)])
-        batch_srcnodes_test, batch_dstnodes_test= load_subtensor(all_feat, test_target_nodes, neibor_nodes_1, neibor_nodes_2, device)
+        batch_srcnodes_test, batch_dstnodes_test= load_subtensor(test_g_nfeat, test_target_nodes, neibor_nodes_1, neibor_nodes_2, device)
         batch_srcnodes_tests.append(batch_srcnodes_test)
         batch_dstnodes_tests.append(batch_dstnodes_test) 
     test_acc, _, test_logits = evaluate(model, test_blocks, len(test_nid), batch_srcnodes_tests, batch_dstnodes_tests, test_labels.to(device), n_classes, loss_fcn, 'test')
@@ -354,8 +373,8 @@ if __name__ == '__main__':
     parser.add_argument('--weight_decay', type=float, default=6e-4, help='Weight decay (L2 loss on parameters).')
     parser.add_argument('--early_stop', action='store_true', default=True,
                         help="indicates whether to use early stop or not")
-    parser.add_argument('--epochs', type=int, default=4000, help='Number of epochs to train.')
-    parser.add_argument('--patience', type=int, default=2000, help='Patience in early stopping')
+    parser.add_argument('--epochs', type=int, default=600, help='Number of epochs to train.')
+    parser.add_argument('--patience', type=int, default=300, help='Patience in early stopping')
     parser.add_argument('--train_ratio', type=float, default=0.2, help='Ratio of training set')
     parser.add_argument('--val_ratio', type=float, default=0.2, help='Ratio of valing set')
     parser.add_argument('--seed', type=int, default=42, help="seed for our system")

@@ -61,6 +61,7 @@ class DiffAttention(nn.Module):
         #04-17 version       
         # logits = self.fc1(g.dstdata['feat'].float()) + g.dstdata.pop('h_diff') 
         logits = self.fc1(h_dst.float()) + g.dstdata.pop('h_diff')      
+        # logits = g.dstdata.pop('h_diff')  #04-23    
         return F.elu(logits)
         
         #04-20 version
