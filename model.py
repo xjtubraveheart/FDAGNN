@@ -40,14 +40,7 @@ class DiffGCN(nn.Module):
             self.diff_layer.append(DiffAttention(in_dim, hidden_dim, feat_drop, attn_drop, device))
             self.fusion.append(GRU(hidden_dim, hidden_dim, bias=False))
         self.out_layer = nn.Linear(hidden_dim, out_dim, bias=False)
-        nn.init.xavier_uniform_(self.out_layer.weight, gain=1.414)
-        
-        #新增邻居阶次的自适应选择
-        # if hop_num > 1:
-            # self.neihop_select = LSTM(hidden_dim, hidden_dim)
-        # self.neihop_select = GRU(hidden_dim, hidden_dim, 1, bias=False)
-            # self.neihop_select = GRU(hidden_dim, hidden_dim, dropout=gru_drop)#04-19
-            # self.neihop_select = HopsAttention(hidden_dim)            
+        nn.init.xavier_uniform_(self.out_layer.weight, gain=1.414)            
            
     # def forward(self, g):
     def forward(self, g, h_src, h_dst):
@@ -64,6 +57,7 @@ class DiffGCN(nn.Module):
             
         h = torch.zeros(1, h_dst.shape[0], self.hidden_dim).to(self.device)
         h_in = self.fc(self.feat_drop(h_dst.float())).unsqueeze(0)#04-23
+        h_in = F.elu(h_in)#04-23
         h_out, h = self.fusion[0](h_in, h)#04-23
         for i in range(self.hop_num):
             # h_out, h = self.fusion[i](h_e[i].unsqueeze(0), h)
@@ -76,9 +70,8 @@ class DiffGCN(nn.Module):
             # for i in range(self.hop_num):
             #     h_out, (h, c) = self.neihop_select(h_e[i].unsqueeze(0), (h, c))
             #     h_out = h_out.mean(0)
-        # else:
-        #     h_out = h_e[0]#04-17 version
-            # h_out = F.elu(h_self + h_e[0])#04-20 version            
+         
+        # return self.out_layer(F.elu(h_out))
         return self.out_layer(h_out)
         
 class MLP(nn.Module):

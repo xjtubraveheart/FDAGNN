@@ -62,10 +62,8 @@ class DiffAttention(nn.Module):
         # logits = self.fc1(g.dstdata['feat'].float()) + g.dstdata.pop('h_diff') 
         # logits = self.fc1(h_dst.float()) + g.dstdata.pop('h_diff')      
         logits = g.dstdata.pop('h_diff')  #04-23    
+        # return logits
         return F.elu(logits)
-        
-        #04-20 version
-        # return g.dstdata.pop('h_diff')
 
 class HopsAttention(nn.Module):
     def __init__(self, in_size, dropout=0):

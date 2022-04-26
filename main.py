@@ -16,7 +16,7 @@ from dgl import load_graphs
 from dgl.data.utils import load_info
 from dgl.data import CoraGraphDataset, CiteseerGraphDataset, PubmedGraphDataset
 from model import MLP, DiffGCN
-from utils import EarlyStopping
+from utils import EarlyStopping, FocalLoss
 from sklearn.metrics import auc, f1_score, classification_report, precision_recall_curve, roc_auc_score
 from sklearn.model_selection import train_test_split
 import tqdm
@@ -284,12 +284,14 @@ def main(args):
         test_size = args.test_batch_size 
     logging.log(23,f"---------------------dataset: {args.dataset}-------------------------------------------------------------")
     logging.log(23,f"train: {args.train_ratio * 100:.1f}% val: {args.val_ratio * 100:.1f}% hidden: {args.hidden} train_batch_size:{args.train_batch_size} val_batch_size:{args.val_batch_size} test_batch_size:{args.test_batch_size}")
-    logging.log(23,f"max_hop:{args.neigh_hop} seed: {args.seed} lr: {args.lr} weight_decay: {args.weight_decay} epochs: {args.epochs} feat_drop: {args.feat_drop} attr_drop:{args.attn_drop}")
+    logging.log(23,f"max_hop:{args.neigh_hop} seed: {args.seed} lr: {args.lr} weight_decay: {args.weight_decay} epochs: {args.epochs} feat_drop: {args.feat_drop} attr_drop:{args.attn_drop} fraud-cost:{args.cost_1}")
     model = DiffGCN(num_feats, args.hidden, n_classes, args.neigh_hop, args.feat_drop, args.attn_drop, device)
     if args.early_stop:
         stopper = EarlyStopping(args.patience)
     model.to(device)
-    loss_fcn = torch.nn.CrossEntropyLoss()
+    # weight_CE = torch.FloatTensor([1,args.cost_1,args.cost_2]).to(device)
+    # loss_fcn = torch.nn.CrossEntropyLoss(weight=weight_CE)
+    loss_fcn = FocalLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     train_dataloader_sub = loader_sub(train_g, train_nid, train_size, torch.device('cpu'))
     val_dataloader_sub = loader_sub(val_g, val_nid, val_size, torch.device('cpu'))
@@ -339,6 +341,7 @@ def main(args):
                         f"Val_acc = {val_acc * 100:.4f} "
                         f"({duration:.3f} sec)")
         if args.early_stop and epoch != 0:
+            # if stopper.step(val_acc, model, epoch, val_loss, True):
             if stopper.step(val_acc, model, epoch, val_loss):
                 break   
     #test
@@ -348,7 +351,7 @@ def main(args):
     if args.early_stop:
         logging.log(21, f"best epoch: {stopper.best_epoch}, best val acc:{stopper.best_score * 100:.4f}， val_loss:{stopper.best_epoch_val_loss:.6f}, ({runtime:.3f} sec)")
     if args.early_stop:
-        model.load_state_dict(torch.load('/code/DiffGCN/es_checkpoint.pt'))
+        model.load_state_dict(torch.load('/code/DiffGCN/es_checkpoint.pt'))  
     for (neibor_nodes_1, test_target_nodes, test_blocks_1), (neibor_nodes_2, _, test_blocks_2) in zip(test_dataloader_sub[0], test_dataloader_sub[-1]): 
         test_blocks.append([test_blocks_1[0].to(device), test_blocks_2[0].to(device)])
         batch_srcnodes_test, batch_dstnodes_test= load_subtensor(test_g_nfeat, test_target_nodes, neibor_nodes_1, neibor_nodes_2, device)
@@ -377,10 +380,13 @@ if __name__ == '__main__':
     parser.add_argument('--patience', type=int, default=300, help='Patience in early stopping')
     parser.add_argument('--train_ratio', type=float, default=0.2, help='Ratio of training set')
     parser.add_argument('--val_ratio', type=float, default=0.2, help='Ratio of valing set')
+    parser.add_argument('--cost_1', type=float, default=2, help='Fraud cost')
+    parser.add_argument('--cost_2', type=float, default=1.5, help='Delivery cost')
     parser.add_argument('--seed', type=int, default=42, help="seed for our system")
     parser.add_argument('--print_interval', type=int, default=100, help="the interval of printing in training")
     parser.add_argument('--log_name', type=str, default='DiffGCN', help="Name for logging")
     parser.add_argument('--edgenode', type=bool, default=True, help="edge node not converge other nodes")
+    parser.add_argument('--is_ce_w', type=bool, default=True, help="earlystop base on val_acc or val_loss")
     parser.add_argument('--train_batch_size', type=int, default=6144)
     parser.add_argument('--val_batch_size', type=int, default=6144)
     parser.add_argument('--test_batch_size', type=int, default=8192)
