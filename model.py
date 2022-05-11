@@ -1,78 +1,64 @@
-from operator import concat
-from tkinter import N
-from turtle import forward
 import torch
 import torch.nn as nn
-from torch.nn import init, LSTM, GRU
+from torch.nn import GRU
 import torch.nn.functional as F
-from dgl import function as fn
-from dgl.nn import GATConv
-from layer import ChannelAttention
-from layer import DiffAttention, HopsAttention
-import numpy as np
+from layer import DiffAttention
 
 class DiffGCN(nn.Module):
     def __init__(self,
                 in_dim,
                 hidden_dim,
                 out_dim,
-                hop_num=1,
+                num_layer=1,
                 feat_drop=0,
                 attn_drop=0,
-                # gru_drop=0, #04-19
+                use_diff=True,
                 device='cuda'
                 ):
         super(DiffGCN, self).__init__()
         self.in_dim = in_dim
         self.hidden_dim = hidden_dim
         self.out_dim = out_dim
-        self.hop_num = hop_num
+        self.num_layer = num_layer
+        self.use_diff = use_diff
         self.device = device
         self.feat_drop = nn.Dropout(feat_drop)
-        #04-20 version
+
         self.fc = nn.Linear(in_dim, hidden_dim, bias=False)
         nn.init.xavier_uniform_(self.fc.weight, gain=1.414)
         
+        self.fc = nn.ModuleList()
         self.diff_layer = nn.ModuleList()
         self.fusion = nn.ModuleList()
-        self.fusion.append(GRU(hidden_dim, hidden_dim, bias=False))        
-        for i in range(hop_num):#DiffAttention层堆叠：提取中心节点与多跳邻居节点的特征差异
+        self.fc.append(nn.Linear(in_dim, hidden_dim, bias=False))
+        if use_diff:        
             self.diff_layer.append(DiffAttention(in_dim, hidden_dim, feat_drop, attn_drop, device))
             self.fusion.append(GRU(hidden_dim, hidden_dim, bias=False))
+            self.fusion.append(GRU(hidden_dim, hidden_dim, bias=False))
+        for i in range(num_layer):  
+            self.fc.append(nn.Linear(hidden_dim, hidden_dim, bias=False))
+            if use_diff:      
+                self.diff_layer.append(DiffAttention(hidden_dim, hidden_dim, feat_drop, attn_drop, device))
+                self.fusion.append(GRU(hidden_dim, hidden_dim, bias=False))
+                self.fusion.append(GRU(hidden_dim, hidden_dim, bias=False))
+        for i in range(num_layer):
+            nn.init.xavier_uniform_(self.fc[i].weight, gain=1.414)
         self.out_layer = nn.Linear(hidden_dim, out_dim, bias=False)
         nn.init.xavier_uniform_(self.out_layer.weight, gain=1.414)            
            
-    # def forward(self, g):
-    def forward(self, g, h_src, h_dst):
-        h_e = []
-        # h_self = self.fc(h_dst.float().to(self.device))#04-20 version
-        for i in range(self.hop_num):
-            # h_k = self.diff_layer[i](g[i].to(self.device))
-            h_k = self.diff_layer[i](g[i], h_src[i], h_dst)
-            h_e.append(h_k)
-        #新增邻居阶次的自适应选择
-        # if self.hop_num > 1:
-            # 点积注意力
-            # h_out = self.neihop_select(h_e, self.hop_num)
-            
-        h = torch.zeros(1, h_dst.shape[0], self.hidden_dim).to(self.device)
-        h_in = self.fc(self.feat_drop(h_dst.float())).unsqueeze(0)#04-23
-        h_in = F.elu(h_in)#04-23
-        h_out, h = self.fusion[0](h_in, h)#04-23
-        for i in range(self.hop_num):
-            # h_out, h = self.fusion[i](h_e[i].unsqueeze(0), h)
-            h_out, h = self.fusion[i+1](h_e[i].unsqueeze(0), h)#04-23
-        h_out = h_out.mean(0)
-            
-            # LSTM
-            # h = torch.zeros(1, feat.shape[0], self.hidden_dim).to(self.device)
-            # c = torch.zeros(1, feat.shape[0], self.hidden_dim).to(self.device)
-            # for i in range(self.hop_num):
-            #     h_out, (h, c) = self.neihop_select(h_e[i].unsqueeze(0), (h, c))
-            #     h_out = h_out.mean(0)
-         
-        # return self.out_layer(F.elu(h_out))
-        return self.out_layer(h_out)
+    def forward(self, g, feat):
+        for i in range(self.num_layer):
+            h_src = feat[g[i].srcdata['_ID']]
+            h_dst = feat[g[i].dstdata['_ID']]
+            h_d = self.diff_layer[i](g[i], h_src, h_dst)   
+            h_0 = torch.zeros(1, h_dst.shape[0], self.hidden_dim).to(self.device)
+            h_f = self.fc[i](self.feat_drop(h_dst.float())).unsqueeze(0)
+            h_f = F.elu(h_f)
+            h_out, h = self.fusion[i * self.num_layer](h_f, h_0)
+            h_out, h = self.fusion[i * self.num_layer + 1](h_d.unsqueeze(0), h)
+            h_out = h_out.mean(0)
+            feat = h_out
+        return self.out_layer(feat)
         
 class MLP(nn.Module):
     def __init__(self, in_size, hidden, out_size, dropout=0):

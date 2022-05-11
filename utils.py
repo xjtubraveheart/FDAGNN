@@ -11,27 +11,23 @@ class EarlyStopping:
         self.best_score = None
         self.early_stop = False
         self.best_epoch = None
-        # self.best_epoch_train_loss = 0
         self.best_epoch_val_loss = 0
         
-    def step(self, acc, model, epoch, val_loss, ce_w=False):
-        score = -val_loss if ce_w else acc
-        # score = acc 
+    def step(self, acc, model, epoch, val_loss):
+        score = acc
+        # score = -val_loss
         if self.best_score is None:
             self.best_score = score
             self.best_epoch = epoch
-            # self.best_epoch_train_loss = train_loss
             self.best_epoch_val_loss = val_loss
             self.save_checkpoint(model)
         elif score < self.best_score:
             self.counter += 1
-            #print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
             if self.counter >= self.patience:
                 self.early_stop = True
         else:
             self.best_score = score
             self.best_epoch = epoch
-            # self.best_epoch_train_loss = train_loss
             self.best_epoch_val_loss = val_loss
             self.save_checkpoint(model)
             self.counter = 0
@@ -46,12 +42,20 @@ class FocalLoss(nn.Module):
         super(FocalLoss, self).__init__()
         self.gamma = gamma
         self.size_average = size_average
-        self.elipson = 1e-7
-    
-    def forward(self, inputs, labels):       
-        prob = F.softmax(inputs, dim=1)
-        prob_c = -F.nll_loss(prob, labels, reduction='none') + self.elipson 
+        self.elipson = 1e-8
+
+    def forward(self, inputs, labels):
+        # alpha = [1, 1, 1]
+        # # for i in range(3):
+        # #     alpha.append(1 - torch.sum(labels == i) / len(labels))
+        # # co = [3 , 1 , 1]
+        # # alpha = torch.tensor(co) * torch.tensor(alpha)
+        # alpha = torch.tensor(alpha).to(torch.device('cuda'))
+        # alpha = torch.gather(alpha, 0, labels)     
+        prob = F.softmax(inputs, dim=1) + self.elipson
+        prob_c = -F.nll_loss(prob, labels, reduction='none') 
         loss = -torch.pow((1-prob_c), self.gamma) * torch.log(prob_c) 
+        # loss = -1 * alpha * torch.pow((1-prob_c), self.gamma) * torch.log(prob_c) 
         loss = loss.mean() if self.size_average else loss.sum()
         return loss
 

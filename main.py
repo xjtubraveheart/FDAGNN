@@ -1,16 +1,9 @@
-from pickle import FALSE
-from statistics import mean
 import time, datetime
 import argparse, logging
-from turtle import shape
-from lightgbm import train
 import numpy as np
 from numpy import random
 import scipy.sparse as sp
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import networkx as nx
 import dgl
 from dgl import load_graphs
 from dgl.data.utils import load_info
@@ -19,18 +12,16 @@ from model import MLP, DiffGCN
 from utils import EarlyStopping, FocalLoss
 from sklearn.metrics import auc, f1_score, classification_report, precision_recall_curve, roc_auc_score
 from sklearn.model_selection import train_test_split
-import tqdm
-# the first thought
+
 def setup_seed(seed):
     random.seed(seed)
-    # os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     dgl.seed(seed)
-    # dgl.random.seed(seed)
+
 def accuracy(logits, labels):
     _, indices = torch.max(logits, dim=1)
     correct = torch.sum(indices == labels)
@@ -63,10 +54,8 @@ def gen_mask_category(g, train_per_class_num, val_num, test_num):
     return g, train_idx
 
 def gen_mask(g, train_rate, val_rate):
-    # train_per_class_num=int(g.num_nodes()*train_rate/num_classes)
-    # val_num=int(g.num_nodes()*val_rate)
-    # test_num=int(g.num_nodes()*(1-train_rate-val_rate))
     labels = g.ndata['label']
+    labels = labels.reshape(len(labels))
     g.ndata['label'] = labels.long()
     labels = np.array(labels)
     n_nodes = len(labels)
@@ -87,12 +76,10 @@ def gen_mask(g, train_rate, val_rate):
     g.ndata['test_mask'] = test_mask
     return g
 
-# 修改日志记录为北京时间
 def beijing(sec,what):
     beijing_time = datetime.datetime.now() + datetime.timedelta(hours=8)
     return beijing_time.timetuple()
-
-#剔除掉度为1节点的入边
+ 
 def del_edgenode_indegree(graph):
     graph = dgl.remove_self_loop(graph)
     node_degree = np.array(graph.in_degrees())
@@ -101,46 +88,10 @@ def del_edgenode_indegree(graph):
     graph.remove_edges(graph.in_edges(node_index_edge,'eid'))
     return dgl.add_self_loop(graph)
 
-#目前实现二跳邻居图
-def compute_adj_K(graph, K):
-    if K == 1:
-        graph = dgl.remove_self_loop(graph)
-        graph = dgl.add_self_loop(graph)
-        return graph
-    adj_coo = graph.adj_sparse('coo')
-    i=adj_coo[0].numpy()
-    j=adj_coo[1].numpy()
-    data=np.ones_like(i)
-    adj_coo_torch=torch.sparse_coo_tensor(torch.tensor([i,j]),torch.tensor(data), [graph.num_nodes(), graph.num_nodes()]) 
-    adj_coo_torch=adj_coo_torch.float()
-    adj_coo_K = adj_coo_torch
-    for i in range(K-1):
-        adj_coo_K = torch.sparse.mm(adj_coo_K, adj_coo_torch)#稀疏型：A^2，'COO'
-    indices = adj_coo_K._indices().detach().numpy()
-    row = indices[0]
-    col = indices[1]
-    values = adj_coo_K._values().detach().numpy()
-    not_K_neigh = np.argwhere(values > 1)
-    values = np.delete(values, not_K_neigh)
-    row = np.delete(row, not_K_neigh)
-    col = np.delete(col, not_K_neigh)
-    coo = sp.coo_matrix((values, (row, col)), shape=(graph.num_nodes(), graph.num_nodes()))
-    graph_K_hop = dgl.from_scipy(coo)
-    graph_K_hop = dgl.remove_self_loop(graph_K_hop)
-    graph_K_hop = dgl.add_self_loop(graph_K_hop)
-    # graph_2_hop = del_edgenode_indegree(graph_2_hop)
-    # adj_2_g=torch.sparse_coo_tensor(adj_coo_2._indices(),torch.tensor(values), [graph.num_nodes(), graph.num_nodes()])
-    graph_K_hop.ndata['feat'] = graph.ndata['feat']
-    # graph_K_hop.ndata['label'] = graph.ndata['label']
-    graph_K_hop.ndata['train_mask'] = graph.ndata['train_mask']
-    graph_K_hop.ndata['val_mask'] = graph.ndata['val_mask']
-    graph_K_hop.ndata['test_mask'] = graph.ndata['test_mask']
-    return graph_K_hop
-
-def loader(g_hops, node_id, size, device):
-    sampler = dgl.dataloading.MultiLayerFullNeighborSampler(1)
+def loader(g, node_id, size, device):
+    sampler = dgl.dataloading.MultiLayerFullNeighborSampler(args.num_layer)
     dataloader = dgl.dataloading.DataLoader(
-            g_hops,
+            g,
             node_id,
             sampler,
             device=device,
@@ -150,28 +101,7 @@ def loader(g_hops, node_id, size, device):
             num_workers=0)
     return dataloader
 
-#全部在GPU上进行batch
-def loader_sub(sub_graphs, node_id, size, device):
-    sampler = dgl.dataloading.MultiLayerFullNeighborSampler(1)
-    dataloader_batch = []
-    for i in range(args.neigh_hop):
-        g_t = sub_graphs[i]
-        dataloader = loader(g_t, node_id, size, device)
-        dataloader_batch.append(dataloader)
-    return dataloader_batch
-
-def load_subtensor(nfeat, target_nodes, neigbor_nodes_1, neibor_nodes_2, device):
-    """
-    Extracts features for a subset of nodes
-    """
-    batch_srcnodes = [nfeat[0][neigbor_nodes_1].to(device),nfeat[-1][neibor_nodes_2].to(device)]
-    batch_dstnodes = nfeat[0][target_nodes].to(device)
-    return batch_srcnodes, batch_dstnodes
-
-
 def inductive_split(g):
-    """Split the graph into training graph, validation graph, and test graph by training
-    and validation masks.  Suitable for inductive models."""
     train_id = torch.nonzero(g.ndata['train_mask'], as_tuple=True)[0]
     val_id = torch.nonzero(g.ndata['val_mask'], as_tuple=True)[0]
     test_id = torch.nonzero(g.ndata['test_mask'], as_tuple=True)[0]
@@ -186,24 +116,22 @@ def inductive_split(g):
             test_g = g.subgraph(neighbor_test)
     return train_g, val_g, test_g
 
-def evaluate(model, blocks, num_node_id, src_feats, dst_feats, labels, n_classes, loss_fcn, stage='val'):
+def evaluate(model, blocks, num_node_id, batch_size, batch_feat, labels, n_classes, loss_fcn, device):
     model.eval()
-    pred = torch.zeros(num_node_id, n_classes).to(torch.device('cuda'))
-    batch_size = args.val_batch_size if stage == 'val' else args.test_batch_size
+    pred = torch.zeros(num_node_id, n_classes).to(device)
     with torch.no_grad():
         for i, block in enumerate(blocks):
-            batch_pred = model(block, src_feats[i], dst_feats[i])
+            batch_pred = model(block, batch_feat[i])
             if i != len(blocks)-1:
                 pred[i * batch_size : (i+1) * batch_size, : ] = batch_pred
             else:
                 pred[i * batch_size : , : ] = batch_pred
+        labels = labels.to(device)
         loss = loss_fcn(pred, labels)
         return accuracy(pred, labels), loss, pred
 
 
 def main(args):
-    # logging基础配置
-    # device = torch.device('cuda', 0) if torch.cuda.is_available() else torch.device('cpu')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     setup_seed(args.seed)
     logging.Formatter.converter = beijing
@@ -216,148 +144,114 @@ def main(args):
         filemode='a'
         )
     
-    #load dataset and preprocess
-    if args.dataset == 'citeseer':
-        dataset = CiteseerGraphDataset()
-        n_classes = dataset.num_classes
-        g = dataset[0]
-        g = gen_mask_category(dataset[0],20,500,1000)
-        label_names=['0','1','2','3','4','5']
-    elif args.dataset == 'citeseer_sg':
-        dataset, _ = load_graphs('/code/DiffGCN/data/citeseer_max_sub.bin')
-        n_classes = 6
-        # citeseer train:val:test:20,500,1000
-        g = gen_mask_category(dataset[0],20,500,1000)
-        label_names=['0','1','2','3','4','5']
-    elif args.dataset == 'BUPT':
-    # dataset, _ = load_graphs("./data/Sichuan_tele.bin")  # glist will be [g1]
-        dataset, _ = load_graphs("/code/DiffGCN/data/BUPT_tele.bin")  # glist will be [g1]
+    if args.dataset == 'BUPT':
+        dataset, _ = load_graphs("/code/DiffGCN/data/BUPT_tele.bin") 
         n_classes = load_info("/code/DiffGCN/data/BUPT_tele.pkl")['num_classes']
+        # dataset, _ = load_graphs("/code/DiffGCN/data/BUPT_telecom.bin")  
+        # n_classes = load_info("/code/DiffGCN/data/BUPT_telecom.pkl")['num_classes']
         # {0: 99861, 1: 8448, 2: 8074}
-        #g = gen_mask(dataset[0], 6000,4000, 5000)
-        # g, train_idx = gen_mask_same_num(dataset[0], 6000, 4000, 5000)
         g = gen_mask(dataset[0], args.train_ratio, args.val_ratio)
         label_names=['0','1','2']
+    elif args.dataset == 'SC':
+        dataset, _ = load_graphs("/code/DiffGCN/data/Sichuan_tele.bin")
+        n_classes = load_info("/code/DiffGCN/data/Sichuan_tele.pkl")['num_classes']
+        g = gen_mask(dataset[0], args.train_ratio, args.val_ratio)
+        label_names=['0','1']
         
-    g_hops = []
-    train_g, val_g, test_g = [], [], []
-    for i in range(args.neigh_hop):
-        g_hop = compute_adj_K(g, i+1)
-        if args.edgenode:
-            g_hop = del_edgenode_indegree(g_hop)        
-        # g_hops.append(g_hop.formats(['csc']))
-        g_hops.append(g_hop)
+    if args.edgenode:
+        g = del_edgenode_indegree(g)        
         
-    for i in range(args.neigh_hop):
-        train_g_s, val_g_s, test_g_s = inductive_split(g_hops[i])
-        #下一步在GPU上进行采样，GPU采样只支持csc格式
-        train_g_s = train_g_s.formats(['csc'])
-        val_g_s = val_g_s.formats(['csc'])
-        val_g_s = val_g_s.formats(['csc'])
-        train_g.append(train_g_s)
-        val_g.append(val_g_s)
-        test_g.append(test_g_s)
+    train_g, val_g, test_g = inductive_split(g)
+    train_g = train_g.formats(['csc'])
+    val_g = val_g.formats(['csc'])
+    test_g = test_g.formats(['csc'])
     
-    train_nid = torch.nonzero(train_g[0].ndata['train_mask'], as_tuple=True)[0]
-    val_nid = torch.nonzero(val_g[0].ndata['val_mask'], as_tuple=True)[0]
-    test_nid = torch.nonzero(test_g[0].ndata['test_mask'], as_tuple=True)[0]
-    train_g_feat, val_g_nfeat, test_g_nfeat=[], [], []
-    for i in range(args.neigh_hop):
-        train_g_feat.append(train_g[i].ndata.pop('feat'))
-        val_g_nfeat.append(val_g[i].ndata.pop('feat'))
-        test_g_nfeat.append(test_g[i].ndata.pop('feat'))
-    train_labels = train_g[0].ndata.pop('label')
-    val_labels = val_g[0].ndata.pop('label')
-    test_labels = test_g[0].ndata.pop('label')
+    train_nid = torch.nonzero(train_g.ndata['train_mask'], as_tuple=True)[0]
+    val_nid = torch.nonzero(val_g.ndata['val_mask'], as_tuple=True)[0]
+    test_nid = torch.nonzero(test_g.ndata['test_mask'], as_tuple=True)[0]
+    train_g_nfeat = train_g.ndata.pop('feat')
+    val_g_nfeat = val_g.ndata.pop('feat')
+    test_g_nfeat = test_g.ndata.pop('feat')
+    train_labels = train_g.ndata.pop('label')
+    val_labels = val_g.ndata.pop('label')
+    test_labels = test_g.ndata.pop('label')
     train_labels = train_labels[train_nid]
     val_labels = val_labels[val_nid]
     test_labels = test_labels[test_nid]
-    num_feats = train_g_feat[0].shape[1]
+    num_feats = train_g_nfeat.shape[1]
 
-    if args.neigh_hop == 1:
-        train_size = len(train_nid)
-        val_size = len(val_nid)
-        test_size = len(test_nid)
-    else:
+    if args.is_batch:
         train_size = args.train_batch_size
         val_size = args.val_batch_size
-        test_size = args.test_batch_size 
+        test_size = args.test_batch_size
+    else:
+        train_size = len(train_nid)
+        val_size = len(val_nid)
+        test_size = len(test_nid) 
     logging.log(23,f"---------------------dataset: {args.dataset}-------------------------------------------------------------")
-    logging.log(23,f"train: {args.train_ratio * 100:.1f}% val: {args.val_ratio * 100:.1f}% hidden: {args.hidden} train_batch_size:{args.train_batch_size} val_batch_size:{args.val_batch_size} test_batch_size:{args.test_batch_size}")
-    logging.log(23,f"max_hop:{args.neigh_hop} seed: {args.seed} lr: {args.lr} weight_decay: {args.weight_decay} epochs: {args.epochs} feat_drop: {args.feat_drop} attr_drop:{args.attn_drop} fraud-cost:{args.cost_1}")
-    model = DiffGCN(num_feats, args.hidden, n_classes, args.neigh_hop, args.feat_drop, args.attn_drop, device)
+    logging.log(23,f"train: {args.train_ratio * 100:.1f}% val: {args.val_ratio * 100:.1f}% hidden: {args.hidden} train_batch_size:{train_size} val_batch_size:{val_size} test_batch_size:{test_size}")
+    logging.log(23,f"layers: {args.num_layer} gamma: {args.gamma} seed: {args.seed} lr: {args.lr} weight_decay: {args.weight_decay} epochs: {args.epochs} feat_drop: {args.feat_drop} attr_drop:{args.attn_drop}")
+    model = DiffGCN(num_feats, args.hidden, n_classes, args.num_layer, args.feat_drop, args.attn_drop, args.use_diff, device)
     if args.early_stop:
         stopper = EarlyStopping(args.patience)
     model.to(device)
-    # weight_CE = torch.FloatTensor([1,args.cost_1,args.cost_2]).to(device)
-    # loss_fcn = torch.nn.CrossEntropyLoss(weight=weight_CE)
-    loss_fcn = FocalLoss()
+    # loss_fcn = torch.nn.CrossEntropyLoss()
+    loss_fcn = FocalLoss(args.gamma)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    train_dataloader_sub = loader_sub(train_g, train_nid, train_size, torch.device('cpu'))
-    val_dataloader_sub = loader_sub(val_g, val_nid, val_size, torch.device('cpu'))
-    test_dataloader_sub = loader_sub(test_g, test_nid, test_size, torch.device('cpu'))
-    train_blocks, val_blocks, test_blocks = [], [], []
-    batch_srcnodes_trains, batch_srcnodes_vals, batch_srcnodes_tests = [], [], []
-    batch_dstnodes_trains, batch_dstnodes_vals, batch_dstnodes_tests = [], [], []
-    for (neibor_nodes_1, train_target_nodes, blocks_1), (neibor_nodes_2, _, blocks_2) in zip(train_dataloader_sub[0], train_dataloader_sub[-1]): 
-        train_blocks.append([blocks_1[0].to(device), blocks_2[0].to(device)])
-        batch_srcnodes_train, batch_dstnodes_train= load_subtensor(train_g_feat, train_target_nodes, neibor_nodes_1, neibor_nodes_2, device)
-        batch_srcnodes_trains.append(batch_srcnodes_train)
-        batch_dstnodes_trains.append(batch_dstnodes_train)        
-    for (neibor_nodes_1, val_target_nodes, val_blocks_1), (neibor_nodes_2, _, val_blocks_2) in zip(val_dataloader_sub[0], val_dataloader_sub[-1]): 
-        val_blocks.append([val_blocks_1[0].to(device), val_blocks_2[0].to(device)])
-        batch_srcnodes_val, batch_dstnodes_val= load_subtensor(val_g_nfeat, val_target_nodes, neibor_nodes_1, neibor_nodes_2, device) 
-        batch_srcnodes_vals.append(batch_srcnodes_val)
-        batch_dstnodes_vals.append(batch_dstnodes_val) 
-    del  blocks_1, blocks_2, val_blocks_1,  val_blocks_2
-    del  batch_srcnodes_train, batch_dstnodes_train, batch_srcnodes_val, batch_dstnodes_val 
+    train_dataloader_sub = loader(train_g, train_nid, train_size, torch.device('cpu'))
+    val_dataloader_sub = loader(val_g, val_nid, val_size, torch.device('cpu'))
+    test_dataloader_sub = loader(test_g, test_nid, test_size, torch.device('cpu'))
+    train_batch, val_batch, test_batch = [], [], []
+    train_batch_nfeats, val_batch_nfeats, test_batch_nfeats = [], [], []
+    for src, _, train_blocks_batch in train_dataloader_sub:
+        train_batch.append([train_blocks_batch[i].to(device) for i in range(args.num_layer)])
+        train_batch_nfeats.append(train_g_nfeat[src].to(device))       
+    for src, _, val_blocks_batch in val_dataloader_sub:  
+        val_batch.append([val_blocks_batch[i].to(device) for i in range(args.num_layer)])
+        val_batch_nfeats.append(val_g_nfeat[src].to(device))
+
     start_time = time.time()
     last_time = start_time
     for epoch in range(args.epochs):
         model.train()
         train_acc = []
         pred = torch.zeros(len(train_nid), n_classes).to(device)
-        for i, train_block in enumerate(train_blocks):
-            batch_pred = model(train_block, batch_srcnodes_trains[i], batch_dstnodes_trains[i])
-            if i != len(train_blocks)-1:
-                pred[i * args.train_batch_size : (i+1) * args.train_batch_size, : ] = batch_pred
+        for i, train_block in enumerate(train_batch):
+            batch_pred = model(train_block, train_batch_nfeats[i])
+            if i != len(train_batch)-1:
+                pred[i * train_size : (i+1) * train_size, : ] = batch_pred
             else:
-                pred[i * args.train_batch_size : , : ] = batch_pred
+                pred[i * train_size : , : ] = batch_pred
         train_acc = accuracy(pred, train_labels.to(device))
         loss = loss_fcn(pred, train_labels.to(device))
-        val_acc, val_loss, _ = evaluate(model, val_blocks, len(val_nid), batch_srcnodes_vals, batch_dstnodes_vals, val_labels.to(device), n_classes, loss_fcn, 'val') 
+        val_acc, val_loss, _ = evaluate(model, val_batch, len(val_nid), val_size, val_batch_nfeats, val_labels, n_classes, loss_fcn, device) 
         optimizer.zero_grad()
         loss.backward()      
-        optimizer.step()                                                   
-            # gpu_mem_alloc = torch.cuda.max_memory_allocated() / 1000000 if torch.cuda.is_available() else 0                
+        optimizer.step()                                                                 
         if epoch % args.print_interval == 0 and epoch != 0:
-            duration = time.time() - last_time  # each interval including training and early-stopping
+            duration = time.time() - last_time
             last_time = time.time()
             logging.info(f"Epoch {epoch}: "
                         f"Train_loss = {loss:.6f},"
                         f"Train_acc = {train_acc * 100:.4f},"
-                        # f"Train_acc = {mean(train_acc) * 100:.4f},"
                         f"Val_loss = {val_loss:.6f}, "
                         f"Val_acc = {val_acc * 100:.4f} "
                         f"({duration:.3f} sec)")
         if args.early_stop and epoch != 0:
-            # if stopper.step(val_acc, model, epoch, val_loss, True):
             if stopper.step(val_acc, model, epoch, val_loss):
                 break   
     #test
     runtime = time.time() - start_time
-    del train_blocks, val_blocks, batch_srcnodes_vals, batch_dstnodes_vals, batch_srcnodes_trains, batch_dstnodes_trains
+    del train_batch, val_batch, train_batch_nfeats, val_batch_nfeats
     torch.cuda.empty_cache()
     if args.early_stop:
-        logging.log(21, f"best epoch: {stopper.best_epoch}, best val acc:{stopper.best_score * 100:.4f}， val_loss:{stopper.best_epoch_val_loss:.6f}, ({runtime:.3f} sec)")
+        logging.log(21, f"best epoch: {stopper.best_epoch}, best val acc:{stopper.best_score * 100:.4f}, val_loss:{stopper.best_epoch_val_loss:.6f}, ({runtime:.3f} sec)")
     if args.early_stop:
-        model.load_state_dict(torch.load('/code/DiffGCN/es_checkpoint.pt'))  
-    for (neibor_nodes_1, test_target_nodes, test_blocks_1), (neibor_nodes_2, _, test_blocks_2) in zip(test_dataloader_sub[0], test_dataloader_sub[-1]): 
-        test_blocks.append([test_blocks_1[0].to(device), test_blocks_2[0].to(device)])
-        batch_srcnodes_test, batch_dstnodes_test= load_subtensor(test_g_nfeat, test_target_nodes, neibor_nodes_1, neibor_nodes_2, device)
-        batch_srcnodes_tests.append(batch_srcnodes_test)
-        batch_dstnodes_tests.append(batch_dstnodes_test) 
-    test_acc, _, test_logits = evaluate(model, test_blocks, len(test_nid), batch_srcnodes_tests, batch_dstnodes_tests, test_labels.to(device), n_classes, loss_fcn, 'test')
+        model.load_state_dict(torch.load('/code/DiffGCN/es_checkpoint.pt')) 
+    for src, _, test_blocks_batch in test_dataloader_sub: 
+        test_batch.append([test_blocks_batch[i].to(device) for i in range(args.num_layer)])
+        test_batch_nfeats.append(test_g_nfeat[src].to(device))
+    test_acc, _, test_logits = evaluate(model, test_batch, len(test_nid), test_size, test_batch_nfeats, test_labels, n_classes, loss_fcn, device)
     test_h = torch.argmax(test_logits, dim=1)
     test_f1 = f1_score(test_labels.cpu(), test_h.cpu(), average='macro')
     report = classification_report(test_labels.cpu().detach().numpy(), test_h.cpu().detach().numpy(), target_names=label_names, digits=4)
@@ -367,33 +261,31 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='DiffGCN')
-    parser.add_argument('--dataset', type=str, default='BUPT', help='cora, citeseer, citeseer_sg, pubmed, BUPT, BUPT_SG')
+    parser.add_argument('--dataset', type=str, default='BUPT', help='BUPT, SC')
     parser.add_argument("--feat_drop", type=float, default=0, help="Input dropout probability")
     parser.add_argument("--attn_drop", type=float, default=0, help="attention dropout probability")
     parser.add_argument('--hidden', type=int, default=32, help='Number of hidden units.')   
-    parser.add_argument('--neigh_hop', type=int, default=2, help='K-hop neighbors.')   
+    parser.add_argument('--num_layer', type=int, default=1, help='Number of Conv layers.')   
     parser.add_argument('--lr', type=float, default=4e-3, help='Initial learning rate.')
     parser.add_argument('--weight_decay', type=float, default=6e-4, help='Weight decay (L2 loss on parameters).')
-    parser.add_argument('--early_stop', action='store_true', default=True,
-                        help="indicates whether to use early stop or not")
-    parser.add_argument('--epochs', type=int, default=600, help='Number of epochs to train.')
-    parser.add_argument('--patience', type=int, default=300, help='Patience in early stopping')
+    parser.add_argument('--epochs', type=int, default=2000, help='Number of epochs to train.')
+    parser.add_argument('--patience', type=int, default=500, help='Patience in early stopping')
+    parser.add_argument('--gamma', type=float, default=1, help='gamma in FocalLoss')
     parser.add_argument('--train_ratio', type=float, default=0.2, help='Ratio of training set')
     parser.add_argument('--val_ratio', type=float, default=0.2, help='Ratio of valing set')
-    parser.add_argument('--cost_1', type=float, default=2, help='Fraud cost')
-    parser.add_argument('--cost_2', type=float, default=1.5, help='Delivery cost')
     parser.add_argument('--seed', type=int, default=42, help="seed for our system")
     parser.add_argument('--print_interval', type=int, default=100, help="the interval of printing in training")
     parser.add_argument('--log_name', type=str, default='DiffGCN', help="Name for logging")
     parser.add_argument('--edgenode', type=bool, default=True, help="edge node not converge other nodes")
-    parser.add_argument('--is_ce_w', type=bool, default=True, help="earlystop base on val_acc or val_loss")
+    parser.add_argument('--is_batch', type=bool, default=False, help="batch or not")
+    parser.add_argument('--use_diff', type=bool, default=True, help="use feature differences or not")
     parser.add_argument('--train_batch_size', type=int, default=6144)
     parser.add_argument('--val_batch_size', type=int, default=6144)
     parser.add_argument('--test_batch_size', type=int, default=8192)
     parser.add_argument('--num_workers', type=int, default=4,
                            help="Number of sampling processes. Use 0 for no extra process.")
-    # parser.add_argument('--sample-gpu', action='store_true',
-    #                        help="Perform the sampling process on the GPU. Must have 0 workers.")
+    parser.add_argument('--early_stop', action='store_true', default=True,
+                        help="indicates whether to use early stop or not")
     args = parser.parse_args()
        
     main(args)
