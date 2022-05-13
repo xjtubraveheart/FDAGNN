@@ -27,32 +27,6 @@ def accuracy(logits, labels):
     correct = torch.sum(indices == labels)
     return correct.item() * 1.0 / len(labels)
 
-def gen_mask_category(g, train_per_class_num, val_num, test_num):
-    labels = g.ndata['label']
-    g.ndata['label'] = labels.long()
-    labels = np.array(labels)
-    rng = np.random.default_rng(42)
-    train_idx_split = []
-    n_nodes = len(labels)
-    all_idx = np.arange(n_nodes)
-    for i in range(max(labels) + 1):
-        train_idx_split.append(rng.choice(all_idx[labels == i], train_per_class_num, replace=False))
-    train_idx = np.concatenate(train_idx_split)
-    exclude_train_idx = np.array([i for i in all_idx if i not in train_idx])
-    val_idx = rng.choice(exclude_train_idx, val_num, replace=False)
-    ex_train_val_idx = np.array([i for i in exclude_train_idx if i not in val_idx])
-    test_idx = rng.choice(ex_train_val_idx, test_num, replace=False)
-    train_mask = torch.zeros(n_nodes, dtype=torch.bool)
-    val_mask = torch.zeros(n_nodes, dtype=torch.bool)
-    test_mask = torch.zeros(n_nodes, dtype=torch.bool)
-    train_mask[train_idx] = True
-    val_mask[val_idx] = True
-    test_mask[test_idx] = True
-    g.ndata['train_mask'] = train_mask
-    g.ndata['val_mask'] = val_mask
-    g.ndata['test_mask'] = test_mask
-    return g, train_idx
-
 def gen_mask(g, train_rate, val_rate):
     labels = g.ndata['label']
     labels = labels.reshape(len(labels))
@@ -147,9 +121,6 @@ def main(args):
     if args.dataset == 'BUPT':
         dataset, _ = load_graphs("/code/DiffGCN/data/BUPT_tele.bin") 
         n_classes = load_info("/code/DiffGCN/data/BUPT_tele.pkl")['num_classes']
-        # dataset, _ = load_graphs("/code/DiffGCN/data/BUPT_telecom.bin")  
-        # n_classes = load_info("/code/DiffGCN/data/BUPT_telecom.pkl")['num_classes']
-        # {0: 99861, 1: 8448, 2: 8074}
         g = gen_mask(dataset[0], args.train_ratio, args.val_ratio)
         label_names=['0','1','2']
     elif args.dataset == 'SC':
@@ -195,8 +166,8 @@ def main(args):
     if args.early_stop:
         stopper = EarlyStopping(args.patience)
     model.to(device)
-    # loss_fcn = torch.nn.CrossEntropyLoss()
-    loss_fcn = FocalLoss(args.gamma)
+    loss_fcn = torch.nn.CrossEntropyLoss()
+    # loss_fcn = FocalLoss(args.gamma)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     train_dataloader_sub = loader(train_g, train_nid, train_size, torch.device('cpu'))
     val_dataloader_sub = loader(val_g, val_nid, val_size, torch.device('cpu'))
@@ -240,7 +211,7 @@ def main(args):
         if args.early_stop and epoch != 0:
             if stopper.step(val_acc, model, epoch, val_loss):
                 break   
-    #test
+
     runtime = time.time() - start_time
     del train_batch, val_batch, train_batch_nfeats, val_batch_nfeats
     torch.cuda.empty_cache()
@@ -255,22 +226,25 @@ def main(args):
     test_h = torch.argmax(test_logits, dim=1)
     test_f1 = f1_score(test_labels.cpu(), test_h.cpu(), average='macro')
     report = classification_report(test_labels.cpu().detach().numpy(), test_h.cpu().detach().numpy(), target_names=label_names, digits=4)
-    auc = roc_auc_score(test_labels.cpu(), torch.softmax(test_logits, dim=1).cpu(), average='macro', multi_class='ovo')
+    if n_classes > 2:
+        auc = roc_auc_score(test_labels.cpu(), torch.softmax(test_logits, dim=1).cpu(), average='macro', multi_class='ovo')
+    else:
+        auc = roc_auc_score(test_labels.cpu(), torch.softmax(test_logits, dim=1)[:,1].cpu())
     logging.log(23,f"Test:  Macro_F1: {test_f1 * 100:.4f}%   Accuracy: {test_acc * 100:.4f}%    Macro_AUC: {auc * 100:.4f}%")
     logging.log(23,f'Report:\n {report}')
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='DiffGCN')
-    parser.add_argument('--dataset', type=str, default='BUPT', help='BUPT, SC')
-    parser.add_argument("--feat_drop", type=float, default=0, help="Input dropout probability")
-    parser.add_argument("--attn_drop", type=float, default=0, help="attention dropout probability")
+    parser.add_argument('--dataset', type=str, default='SC', help='BUPT, SC')
+    parser.add_argument("--feat_drop", type=float, default=0.3, help="Input dropout probability")
+    parser.add_argument("--attn_drop", type=float, default=0.7, help="attention dropout probability")
     parser.add_argument('--hidden', type=int, default=32, help='Number of hidden units.')   
     parser.add_argument('--num_layer', type=int, default=1, help='Number of Conv layers.')   
-    parser.add_argument('--lr', type=float, default=4e-3, help='Initial learning rate.')
+    parser.add_argument('--lr', type=float, default=1e-3, help='Initial learning rate.')
     parser.add_argument('--weight_decay', type=float, default=6e-4, help='Weight decay (L2 loss on parameters).')
-    parser.add_argument('--epochs', type=int, default=2000, help='Number of epochs to train.')
-    parser.add_argument('--patience', type=int, default=500, help='Patience in early stopping')
-    parser.add_argument('--gamma', type=float, default=1, help='gamma in FocalLoss')
+    parser.add_argument('--epochs', type=int, default=600, help='Number of epochs to train.')
+    parser.add_argument('--patience', type=int, default=300, help='Patience in early stopping')
+    parser.add_argument('--gamma', type=float, default=0.5, help='gamma in FocalLoss')
     parser.add_argument('--train_ratio', type=float, default=0.2, help='Ratio of training set')
     parser.add_argument('--val_ratio', type=float, default=0.2, help='Ratio of valing set')
     parser.add_argument('--seed', type=int, default=42, help="seed for our system")
@@ -279,9 +253,9 @@ if __name__ == '__main__':
     parser.add_argument('--edgenode', type=bool, default=True, help="edge node not converge other nodes")
     parser.add_argument('--is_batch', type=bool, default=False, help="batch or not")
     parser.add_argument('--use_diff', type=bool, default=True, help="use feature differences or not")
-    parser.add_argument('--train_batch_size', type=int, default=6144)
-    parser.add_argument('--val_batch_size', type=int, default=6144)
-    parser.add_argument('--test_batch_size', type=int, default=8192)
+    parser.add_argument('--train_batch_size', type=int, default=2048)
+    parser.add_argument('--val_batch_size', type=int, default=2048)
+    parser.add_argument('--test_batch_size', type=int, default=4096)
     parser.add_argument('--num_workers', type=int, default=4,
                            help="Number of sampling processes. Use 0 for no extra process.")
     parser.add_argument('--early_stop', action='store_true', default=True,
