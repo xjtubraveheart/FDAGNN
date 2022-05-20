@@ -45,7 +45,7 @@ class FocalLoss(nn.Module):
         self.elipson = 1e-8
 
     def forward(self, inputs, labels):
-        # alpha = [1, 1, 1]
+        # alpha = [1, 2, 1]
         # # for i in range(3):
         # #     alpha.append(1 - torch.sum(labels == i) / len(labels))
         # # co = [3 , 1 , 1]
@@ -53,7 +53,7 @@ class FocalLoss(nn.Module):
         # alpha = torch.tensor(alpha).to(torch.device('cuda'))
         # alpha = torch.gather(alpha, 0, labels)     
         prob = F.softmax(inputs, dim=1) + self.elipson
-        prob_c = -F.nll_loss(prob, labels, reduction='none') 
+        prob_c = -F.nll_loss(prob, labels, reduction='none')
         loss = -torch.pow((1-prob_c), self.gamma) * torch.log(prob_c) 
         # loss = -1 * alpha * torch.pow((1-prob_c), self.gamma) * torch.log(prob_c) 
         loss = loss.mean() if self.size_average else loss.sum()

@@ -21,21 +21,23 @@ class DiffAttention(nn.Module):
         
         self.attn_fc = nn.Linear(out_dim, 1, bias=False)
         nn.init.xavier_uniform_(self.attn_fc.weight, gain=1.414)
-    
+
+    #apply attention
     def edge_attention(self, edges): 
         diff = edges.dst['h'] - edges.src['h']  
         diff = self.fc(self.feat_drop(diff.float()))
         a = self.attn_fc(diff)
         return {'e': torch.tanh(a), 'diff_v_sub_u': diff} 
+        # return {'e': F.elu(a), 'diff_v_sub_u': diff} 
     
     def message_func(self, edges):
         return {'diff_v_sub_u': edges.data['diff_v_sub_u'], 'e': edges.data['e']}
-        
+       
     def reduce_func(self, nodes):
         alpha = self.attn_drop(F.softmax(nodes.mailbox['e'], dim=1))
         h_diff = torch.sum(alpha * nodes.mailbox['diff_v_sub_u'], dim=1)
         return {'h_diff': h_diff}
-       
+    
     def forward(self, g, h_src, h_dst):  
         g.srcdata['h'] = h_src
         g.dstdata['h'] = h_dst
@@ -43,3 +45,38 @@ class DiffAttention(nn.Module):
         g.update_all(self.message_func, self.reduce_func)  
         logits = g.dstdata.pop('h_diff')
         return F.elu(logits)
+
+    #Diff-Mean  
+    # def message_func(self, edges):
+    #     diff = edges.dst['h'] - edges.src['h']  
+    #     diff = self.fc(self.feat_drop(diff.float()))
+    #     return {'diff_v_sub_u': diff}
+       
+    # def reduce_func(self, nodes):
+    #     return {'h_agg': torch.mean(nodes.mailbox['diff_v_sub_u'], dim=1).float()}
+    
+    # def forward(self, g, h_src, h_dst):  
+    #     g.srcdata['h'] = h_src
+    #     g.dstdata['h'] = h_dst
+    #     g.update_all(self.message_func, self.reduce_func)  
+    #     logits = g.dstdata.pop('h_agg')
+    #     return F.elu(logits)
+ 
+    
+ 
+    #Aggregator:mean
+    # def message_func(self, edges):
+    #     return {'m': self.feat_drop(edges.src['h'])}
+    # def reduce_func(self, nodes):
+    #     return {'h_agg': self.fc(torch.mean(nodes.mailbox['m'], dim=1).float())}    
+    
+    # def forward(self, g, h_src, h_dst):  
+    #     g.srcdata['h'] = h_src
+    #     g.dstdata['h'] = h_dst
+    #     g.update_all(self.message_func, self.reduce_func)  
+    #     logits = g.dstdata.pop('h_agg')
+    #     return F.elu(logits)
+    # 原始特征与原始特征的平均聚合，采用GRU融合，效果更好。回头可以再发篇
+
+       
+    
